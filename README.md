@@ -99,7 +99,7 @@ browser_profile(name="remote-server")
 Drop this directory into `~/.hermes/plugins/` or install with:
 
 ```
-hermes plugins install <owner>/hermes-plugin-chrome-profiles
+hermes plugins install anpicasso/hermes-plugin-chrome-profiles
 ```
 
 The installer will automatically copy `config.yaml.example` to `config.yaml` for you.
