@@ -1,0 +1,29 @@
+# Chrome profile configuration for browser_profile tool
+#
+# Each profile defines a Chrome instance the agent can connect to via CDP.
+#
+# Types:
+#   local  — Chrome runs on this machine. Will auto-launch if not running.
+#   remote — Chrome runs elsewhere. Fails if host:port is unreachable.
+#
+# chrome_binary (optional): absolute path to Chrome executable.
+#   Per-profile overrides top-level. Top-level overrides PATH auto-detect.
+
+# chrome_binary: /opt/google/chrome/google-chrome
+
+profiles:
+  work:
+    type: local
+    port: 9250
+    data_dir: ~/.config/chrome-work
+
+  personal:
+    type: local
+    port: 9251
+    data_dir: ~/.config/chrome-personal
+    # chrome_binary: /usr/bin/google-chrome-beta
+
+  # remote-server:
+  #   type: remote
+  #   host: 192.168.1.100
+  #   port: 9250
