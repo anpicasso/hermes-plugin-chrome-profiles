@@ -4,18 +4,22 @@ Chrome Profiles Plugin
 
 Registers a ``browser_profile`` tool that switches the agent's browser tools
 to a named Chrome instance via CDP.  Supports local (auto-launch) and remote
-(reachability-gated) profiles defined in ``profiles.yaml``.
+(reachability-gated) profiles defined in ``config.yaml``.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import shutil
 import socket
 import subprocess
+import threading
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,7 +44,7 @@ def _plugin_dir() -> Path:
 
 
 def _load_config(reload: bool = False) -> Dict[str, Any]:
-    """Load and cache profiles.yaml from the plugin directory."""
+    """Load and cache config.yaml from the plugin directory."""
     global _cached_config
     if _cached_config is not None and not reload:
         return _cached_config
@@ -51,7 +55,7 @@ def _load_config(reload: bool = False) -> Dict[str, Any]:
         return _cached_config
 
     if yaml is None:
-        logger.error("PyYAML not available — cannot load profiles.yaml")
+        logger.error("PyYAML not available — cannot load config.yaml")
         _cached_config = {}
         return _cached_config
 
@@ -70,6 +74,48 @@ def _get_profiles() -> Dict[str, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 _active_profile: Optional[str] = None
+
+# ---------------------------------------------------------------------------
+# Process tracking (BUG 2): Track launched Chrome PIDs to prevent orphans
+# ---------------------------------------------------------------------------
+# Maps profile name -> PID of launched Chrome process
+_chrome_pids: Dict[str, int] = {}
+
+def _cleanup_chrome_processes():
+    """atexit handler: terminate all tracked Chrome processes on shutdown."""
+    for profile_name, pid in list(_chrome_pids.items()):
+        try:
+            import signal
+            os.kill(pid, signal.SIGTERM)
+            logger.info("Terminated Chrome process for profile '%s' (PID %d)", profile_name, pid)
+        except ProcessLookupError:
+            pass  # Process already dead
+        except Exception as e:
+            logger.warning("Failed to terminate Chrome for '%s': %s", profile_name, e)
+
+atexit.register(_cleanup_chrome_processes)
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process with given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Concurrency control (BUG 3): Per-profile launch locks to prevent TOCTOU races
+# ---------------------------------------------------------------------------
+_profile_locks: Dict[str, threading.Lock] = {}
+
+def _get_profile_lock(profile_name: str) -> threading.Lock:
+    """Get or create a lock for the given profile to serialize launch attempts."""
+    if profile_name not in _profile_locks:
+        _profile_locks[profile_name] = threading.Lock()
+    return _profile_locks[profile_name]
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +168,31 @@ def _find_chrome(profile_cfg: Dict[str, Any]) -> Optional[str]:
 
 def _is_port_open(host: str, port: int, timeout: float = 2.0) -> bool:
     """Check if a TCP port is reachable."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((host, port))
-        s.close()
         return True
     except (OSError, socket.timeout):
+        return False
+    finally:
+        # Always close socket to prevent leaks, even on connection error
+        s.close()
+
+
+def _is_cdp_ready(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Check if CDP endpoint is responding with valid debugger URL.
+
+    Fetches /json/version and verifies 'webSocketDebuggerUrl' is present.
+    This ensures not just the port is open, but Chrome is actually ready for CDP.
+    """
+    try:
+        url = f"http://{host}:{port}/json/version"
+        req = urllib.request.Request(url, headers={"Connection": "close"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return "webSocketDebuggerUrl" in data
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError):
         return False
 
 
@@ -136,9 +200,14 @@ def _is_port_open(host: str, port: int, timeout: float = 2.0) -> bool:
 # Chrome launch (local only)
 # ---------------------------------------------------------------------------
 
-def _launch_chrome(chrome_binary: str, data_dir: str, port: int) -> bool:
+def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: str = "") -> bool:
     """Launch Chrome with remote debugging.  Returns True if port comes up."""
+    global _chrome_pids
+
     expanded_dir = os.path.expanduser(data_dir)
+
+    # BUG 6: Log stderr to file for debugging launch failures
+    log_file_path = os.path.join(expanded_dir, "chrome-launch.log")
 
     cmd = [
         chrome_binary,
@@ -151,21 +220,47 @@ def _launch_chrome(chrome_binary: str, data_dir: str, port: int) -> bool:
     logger.info("Launching Chrome: %s", " ".join(cmd))
 
     try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # BUG 6: Capture stderr to log file instead of DEVNULL
+        with open(log_file_path, "w") as log_file:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
+                start_new_session=True,
+            )
+            # BUG 2: Track PID for cleanup on shutdown
+            if profile_name:
+                _chrome_pids[profile_name] = process.pid
+                logger.debug("Tracking Chrome PID %d for profile '%s'", process.pid, profile_name)
     except Exception as e:
         logger.error("Failed to launch Chrome: %s", e)
         return False
 
-    # Poll for port readiness
-    for _ in range(20):  # 10 seconds max
-        time.sleep(0.5)
-        if _is_port_open("127.0.0.1", port, timeout=1.0):
+    # BUG 12: Read configurable timeout from config, default to 10s
+    config = _load_config()
+    launch_timeout = config.get("launch_timeout", 10)
+    poll_interval = 0.5
+    max_attempts = int(launch_timeout / poll_interval)
+
+    # BUG 4: Poll for CDP readiness (not just port open)
+    for attempt in range(max_attempts):
+        time.sleep(poll_interval)
+        if _is_cdp_ready("127.0.0.1", port, timeout=1.0):
+            logger.info("Chrome ready on port %d after %.1fs", port, (attempt + 1) * poll_interval)
             return True
+
+    # BUG 6: If timeout, read and include log contents in error message
+    logger.warning("Chrome launch timeout after %ds. Log contents:")
+    try:
+        with open(log_file_path, "r") as log_file:
+            log_contents = log_file.read()
+            if log_contents:
+                for line in log_contents.strip().split("\n"):
+                    logger.warning("  %s", line)
+            else:
+                logger.warning("  (empty log file)")
+    except Exception as read_err:
+        logger.warning("  (could not read log: %s)", read_err)
 
     return False
 
@@ -179,8 +274,10 @@ def _flush_browser_sessions():
     try:
         from tools.browser_tool import cleanup_all_browsers
         cleanup_all_browsers()
-    except Exception:
-        pass
+    except ImportError:
+        pass  # Expected when browser_tool not available
+    except Exception as e:
+        logger.warning("Failed to flush browser sessions: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +289,27 @@ def _list_profiles_response() -> str:
     global _active_profile
     profiles = _get_profiles()
     entries = []
+
+    # BUG 7: Check if active profile is still reachable, clear if not
+    if _active_profile and _active_profile in profiles:
+        cfg = profiles[_active_profile]
+        port = cfg.get("port")
+        host = "127.0.0.1" if cfg.get("type", "local") == "local" else cfg.get("host", "")
+        if port and not _is_cdp_ready(host, port, timeout=1.0):
+            logger.info("Active profile '%s' no longer reachable, clearing", _active_profile)
+            _active_profile = None
+
     for name, cfg in profiles.items():
+        port = cfg.get("port")
+        host = "127.0.0.1" if cfg.get("type", "local") == "local" else cfg.get("host", "")
+        reachable = _is_cdp_ready(host, port, timeout=0.5) if port else False
+
         entry: Dict[str, Any] = {
             "name": name,
             "type": cfg.get("type", "local"),
-            "port": cfg.get("port"),
+            "port": port,
             "active": name == _active_profile,
+            "reachable": reachable,
         }
         if cfg.get("type") == "remote":
             entry["host"] = cfg.get("host", "")
@@ -221,10 +333,17 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
     """
     global _active_profile
 
+    # BUG 11: Return clear error if PyYAML is not available
+    if yaml is None:
+        return json.dumps({
+            "error": "PyYAML not installed. Install with: pip install pyyaml",
+        })
+
     name = args.get("name", "").strip()
 
-    # No name → list profiles
+    # BUG 8: Reload config in list mode too to pick up edits
     if not name:
+        _load_config(reload=True)
         return _list_profiles_response()
 
     # Reload config each time to pick up edits without restart
@@ -243,6 +362,10 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
 
     if not port:
         return json.dumps({"error": f"Profile '{name}' has no port configured"})
+
+    # BUG 10: Validate port range
+    if not isinstance(port, int) or not (1 <= port <= 65535):
+        return json.dumps({"error": f"Profile '{name}' has invalid port {port!r} (must be 1-65535)"})
 
     # --- REMOTE ---
     if profile_type == "remote":
@@ -272,32 +395,53 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
         })
 
     # --- LOCAL ---
-    if not _is_port_open("127.0.0.1", port):
-        # Not running — try to launch
-        chrome_binary = _find_chrome(cfg)
-        if not chrome_binary:
-            return json.dumps({
-                "error": (
-                    f"Profile '{name}' is not running on port {port} and no Chrome "
-                    "binary found. Set chrome_binary in profiles.yaml or install Chrome."
-                ),
-                "profile": name,
-                "port": port,
-            })
+    # BUG 3: Use per-profile lock to prevent TOCTOU race conditions
+    # Two concurrent calls could both see port closed and both launch Chrome
+    profile_lock = _get_profile_lock(name)
+    with profile_lock:
+        # Re-check port inside lock - another thread may have launched Chrome
+        if not _is_cdp_ready("127.0.0.1", port, timeout=1.0):
+            # BUG 2: Check if we have a tracked PID that's still alive
+            existing_pid = _chrome_pids.get(name)
+            if existing_pid and _is_pid_alive(existing_pid):
+                logger.info("Profile '%s' has alive PID %d, waiting for it to be ready", name, existing_pid)
+                # Wait for existing Chrome to become ready
+                for _ in range(20):
+                    time.sleep(0.5)
+                    if _is_cdp_ready("127.0.0.1", port, timeout=1.0):
+                        break
+                else:
+                    # PID exists but Chrome not responding - might be stuck, proceed to try launch
+                    logger.warning("Tracked PID %d for '%s' not responding, will attempt new launch", existing_pid, name)
+                    del _chrome_pids[name]
 
-        data_dir = cfg.get("data_dir", "")
-        if not data_dir:
-            return json.dumps({
-                "error": f"Local profile '{name}' has no data_dir configured",
-            })
+            if not _is_cdp_ready("127.0.0.1", port, timeout=1.0):
+                chrome_binary = _find_chrome(cfg)
+                if not chrome_binary:
+                    return json.dumps({
+                        "error": (
+                            f"Profile '{name}' is not running on port {port} and no Chrome "
+                            "binary found. Set chrome_binary in config.yaml or install Chrome."
+                        ),
+                        "profile": name,
+                        "port": port,
+                    })
 
-        launched = _launch_chrome(chrome_binary, data_dir, port)
-        if not launched:
-            return json.dumps({
-                "error": f"Launched Chrome for '{name}' but port {port} didn't come up within 10s",
-                "profile": name,
-                "port": port,
-            })
+                data_dir = cfg.get("data_dir", "")
+                if not data_dir:
+                    return json.dumps({
+                        "error": f"Local profile '{name}' has no data_dir configured",
+                    })
+
+                launched = _launch_chrome(chrome_binary, data_dir, port, profile_name=name)
+                if not launched:
+                    config = _load_config()
+                    timeout = config.get("launch_timeout", 10)
+                    return json.dumps({
+                        "error": f"Launched Chrome for '{name}' but port {port} didn't come up within {timeout}s",
+                        "profile": name,
+                        "port": port,
+                    })
 
     _flush_browser_sessions()
     cdp_url = f"http://127.0.0.1:{port}"
