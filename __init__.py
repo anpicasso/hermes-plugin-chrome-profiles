@@ -130,6 +130,12 @@ _CHROME_SEARCH_NAMES = [
     "chromium",
 ]
 
+_EDGE_SEARCH_NAMES = [
+    "microsoft-edge",
+    "microsoft-edge-stable",
+    "edge",
+]
+
 
 def _find_chrome(profile_cfg: Dict[str, Any]) -> Optional[str]:
     """Resolve Chrome binary path.
@@ -160,6 +166,71 @@ def _find_chrome(profile_cfg: Dict[str, Any]) -> Optional[str]:
             return found
 
     return None
+
+
+def _find_edge(profile_cfg: Dict[str, Any]) -> Optional[str]:
+    """Resolve Edge binary path.
+
+    Priority: profile-level edge_binary > top-level edge_binary > PATH.
+    """
+    # Per-profile override
+    binary = profile_cfg.get("edge_binary")
+    if binary:
+        expanded = os.path.expanduser(binary)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+        logger.warning("Profile edge_binary not found/executable: %s", expanded)
+
+    # Top-level override
+    config = _load_config()
+    binary = config.get("edge_binary")
+    if binary:
+        expanded = os.path.expanduser(binary)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+        logger.warning("Top-level edge_binary not found/executable: %s", expanded)
+
+    # Auto-detect from PATH
+    for name in _EDGE_SEARCH_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    return None
+
+
+def _find_browser(profile_cfg: Dict[str, Any]) -> tuple[Optional[str], str]:
+    """Resolve browser binary path and type.
+    
+    Returns: (binary_path, browser_type) where browser_type is 'chrome' or 'edge'
+    Priority: Check browser_type in config first, then try auto-detect.
+    """
+    browser_type = profile_cfg.get("browser_type", "auto").lower()
+    
+    # If explicitly set to edge, only look for Edge
+    if browser_type == "edge":
+        edge_binary = _find_edge(profile_cfg)
+        if edge_binary:
+            return edge_binary, "edge"
+        return None, "edge"
+    
+    # If explicitly set to chrome, only look for Chrome
+    if browser_type == "chrome":
+        chrome_binary = _find_chrome(profile_cfg)
+        if chrome_binary:
+            return chrome_binary, "chrome"
+        return None, "chrome"
+    
+    # Auto-detect: Try Chrome first, then Edge
+    chrome_binary = _find_chrome(profile_cfg)
+    if chrome_binary:
+        return chrome_binary, "chrome"
+    
+    edge_binary = _find_edge(profile_cfg)
+    if edge_binary:
+        return edge_binary, "edge"
+    
+    return None, "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +336,67 @@ def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: s
     return False
 
 
+def _launch_edge(edge_binary: str, profile_directory: str, port: int, profile_name: str = "") -> bool:
+    """Launch Microsoft Edge with remote debugging. Returns True if port comes up.
+    
+    Edge uses --profile-directory instead of --user-data-dir.
+    """
+    global _chrome_pids
+
+    # Use /tmp for Edge logs since Edge doesn't use data_dir like Chrome
+    log_file_path = f"/tmp/edge-{profile_name}-launch.log"
+
+    cmd = [
+        edge_binary,
+        f"--profile-directory={profile_directory}",
+        f"--remote-debugging-port={port}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+
+    logger.info("Launching Edge: %s", " ".join(cmd))
+
+    try:
+        with open(log_file_path, "w") as log_file:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
+                start_new_session=True,
+            )
+            if profile_name:
+                _chrome_pids[profile_name] = process.pid
+                logger.debug("Tracking Edge PID %d for profile '%s'", process.pid, profile_name)
+    except Exception as e:
+        logger.error("Failed to launch Edge: %s", e)
+        return False
+
+    config = _load_config()
+    launch_timeout = config.get("launch_timeout", 10)
+    poll_interval = 0.5
+    max_attempts = int(launch_timeout / poll_interval)
+
+    for attempt in range(max_attempts):
+        time.sleep(poll_interval)
+        if _is_cdp_ready("127.0.0.1", port, timeout=1.0):
+            logger.info("Edge ready on port %d after %.1fs", port, (attempt + 1) * poll_interval)
+            return True
+
+    logger.warning("Edge launch timeout after %ds. Log contents:", launch_timeout)
+    try:
+        with open(log_file_path, "r") as log_file:
+            log_contents = log_file.read()
+            if log_contents:
+                for line in log_contents.strip().split("\n"):
+                    logger.warning("  %s", line)
+            else:
+                logger.warning("  (empty log file)")
+    except Exception as read_err:
+        logger.warning("  (could not read log: %s)", read_err)
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Cleanup helper
 # ---------------------------------------------------------------------------
@@ -310,11 +442,16 @@ def _list_profiles_response() -> str:
             "port": port,
             "active": name == _active_profile,
             "reachable": reachable,
+            "browser_type": cfg.get("browser_type", "auto"),
         }
         if cfg.get("type") == "remote":
             entry["host"] = cfg.get("host", "")
         else:
-            entry["data_dir"] = cfg.get("data_dir", "")
+            # Show appropriate dir config based on browser type
+            if cfg.get("browser_type") == "edge":
+                entry["profile_directory"] = cfg.get("profile_directory", "Default")
+            else:
+                entry["data_dir"] = cfg.get("data_dir", "")
         entries.append(entry)
 
     return json.dumps({
@@ -416,32 +553,49 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
                     del _chrome_pids[name]
 
             if not _is_cdp_ready("127.0.0.1", port, timeout=1.0):
-                chrome_binary = _find_chrome(cfg)
-                if not chrome_binary:
+                browser_binary, browser_type = _find_browser(cfg)
+                if not browser_binary:
                     return json.dumps({
                         "error": (
-                            f"Profile '{name}' is not running on port {port} and no Chrome "
-                            "binary found. Set chrome_binary in config.yaml or install Chrome."
+                            f"Profile '{name}' is not running on port {port} and no browser "
+                            "binary found. Set chrome_binary or edge_binary in config.yaml, "
+                            "or install Chrome/Edge."
                         ),
                         "profile": name,
                         "port": port,
                     })
 
-                data_dir = cfg.get("data_dir", "")
-                if not data_dir:
-                    return json.dumps({
-                        "error": f"Local profile '{name}' has no data_dir configured",
-                    })
+                if browser_type == "edge":
+                    # Edge uses profile_directory instead of data_dir
+                    profile_directory = cfg.get("profile_directory", "Default")
+                    launched = _launch_edge(browser_binary, profile_directory, port, profile_name=name)
+                    if not launched:
+                        config = _load_config()
+                        timeout = config.get("launch_timeout", 10)
+                        return json.dumps({
+                            "error": f"Launched Edge for '{name}' but port {port} didn't come up within {timeout}s",
+                            "profile": name,
+                            "port": port,
+                            "browser": "edge",
+                        })
+                else:
+                    # Chrome uses data_dir
+                    data_dir = cfg.get("data_dir", "")
+                    if not data_dir:
+                        return json.dumps({
+                            "error": f"Local profile '{name}' has no data_dir configured",
+                        })
 
-                launched = _launch_chrome(chrome_binary, data_dir, port, profile_name=name)
-                if not launched:
-                    config = _load_config()
-                    timeout = config.get("launch_timeout", 10)
-                    return json.dumps({
-                        "error": f"Launched Chrome for '{name}' but port {port} didn't come up within {timeout}s",
-                        "profile": name,
-                        "port": port,
-                    })
+                    launched = _launch_chrome(browser_binary, data_dir, port, profile_name=name)
+                    if not launched:
+                        config = _load_config()
+                        timeout = config.get("launch_timeout", 10)
+                        return json.dumps({
+                            "error": f"Launched Chrome for '{name}' but port {port} didn't come up within {timeout}s",
+                            "profile": name,
+                            "port": port,
+                            "browser": "chrome",
+                        })
 
     _flush_browser_sessions()
     cdp_url = f"http://127.0.0.1:{port}"
@@ -496,7 +650,7 @@ def register(ctx):
     """Called by the Hermes plugin system on load."""
     ctx.register_tool(
         name="browser_profile",
-        toolset="browser",
+        toolset="chrome_profiles",
         schema=BROWSER_PROFILE_SCHEMA,
         handler=browser_profile,
         description="Switch browser tools to a named Chrome profile via CDP",

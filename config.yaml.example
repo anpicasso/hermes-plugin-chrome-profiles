@@ -1,27 +1,41 @@
-# Chrome profile configuration for browser_profile tool
+# Chrome/Edge profile configuration for browser_profile tool
 #
-# Each profile defines a Chrome instance the agent can connect to via CDP.
+# Each profile defines a browser instance the agent can connect to via CDP.
 #
 # Types:
-#   local  — Chrome runs on this machine. Will auto-launch if not running.
-#   remote — Chrome runs elsewhere. Fails if host:port is unreachable.
+#   local  — Browser runs on this machine. Will auto-launch if not running.
+#   remote — Browser runs elsewhere. Fails if host:port is unreachable.
 #
-# chrome_binary (optional): absolute path to Chrome executable.
+# Browser selection (per-profile):
+#   browser_type: chrome | edge | auto (default: auto)
+#   For auto: tries Chrome first, then Edge
+#
+# Binary paths (optional): absolute path to browser executable.
 #   Per-profile overrides top-level. Top-level overrides PATH auto-detect.
-
+#
 # chrome_binary: /opt/google/chrome/google-chrome
+# edge_binary: /usr/bin/microsoft-edge
 
 profiles:
   work:
     type: local
+    browser_type: chrome
     port: 9250
     data_dir: ~/.config/chrome-work
 
   personal:
     type: local
+    browser_type: chrome
     port: 9251
     data_dir: ~/.config/chrome-personal
     # chrome_binary: /usr/bin/google-chrome-beta
+
+  # Example: Microsoft Edge profile (no data_dir, uses profile_directory)
+  devsu:
+    type: local
+    browser_type: edge
+    port: 9223
+    profile_directory: "Default"
 
   # remote-server:
   #   type: remote
