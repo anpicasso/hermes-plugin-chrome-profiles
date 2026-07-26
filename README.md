@@ -1,5 +1,23 @@
 # Chrome/Brave/Edge Profiles Plugin
 
+**Instructions from Hermes Agent:**
+```
+╭─ ⚕ Hermes ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    Here's exactly how it works going forward:
+    
+    How it works now:
+    - You do NOT need to manually quit Brave / relaunch it with debug flags anymore.
+    - In any new Hermes session, just say something like "connect to my Research Brave profile"
+    and I'll call browser_profile(name="profile 2").
+    - The plugin checks if port 9222 is already listening with CDP ready. If yes, it just attaches instantly, no relaunch.
+    - If Brave isn't running at all, it auto-launches `Brave Browser --profile-directory="Profile 3"
+    --remote-debugging-port=9222` for you and waits for it to come up.
+    - The only manual step that's still needed: if you have a plain, non-debug Brave window already open using the
+    default profile/data_dir, that one holds the single-instance lock and blocks the launch — you'd need to quit it
+    first. Once Profile 3 is launched in debug mode, it persists and future sessions just reattach.
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
 Switch the agent's browser tools between multiple Chrome, Brave, **or Microsoft Edge** instances via CDP (Chrome DevTools Protocol). Each profile maps to a browser instance with its own user data directory, cookies, and authenticated sessions.
 
 Supports **Google Chrome** and **Brave** (`--user-data-dir`, optionally combined with `--profile-directory` to select a named sub-profile) and **Microsoft Edge** (`--profile-directory` only).
