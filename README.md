@@ -18,6 +18,41 @@ When called, it:
 
 Calling `browser_profile()` with no arguments lists all available profiles and which one is currently active.
 
+## What this does NOT do
+
+**`data_dir` (or `profile_directory`) *is* the profile.** This tool does not
+reach into an existing browser and select one of its named profiles
+(e.g. Chrome/Brave's "Profile 2") — it launches a browser process pointed at
+whatever directory you give it. Point it at a directory that already has a
+profile, that's what opens.
+
+**It cannot pick a profile out of an already-running shared browser.** If you
+normally run one Chrome/Brave with several named profiles (Default,
+"Work", "Personal", ...) sharing one `--user-data-dir`, and that browser is
+already open, a second launch against that *same* `--user-data-dir` —
+even with a different `--profile-directory` and a fresh
+`--remote-debugging-port` — gets silently absorbed by Chromium's
+single-instance lock. The new port never comes up (the tool call times out);
+the request just opens a window/tab in whatever process was already running,
+ignoring the new debugging port.
+
+**To manage one of those existing named profiles with this tool**, copy it
+out into its own directory first:
+
+```
+cp -R "$HOME/Library/Application Support/Google/Chrome/Profile 2" ~/.config/chrome-work
+```
+
+Then point a `config.yaml` entry's `data_dir` at the copy. It's a snapshot,
+not a live link — logins made in the original profile afterward won't
+appear in the copy.
+
+**Switching between two already-launched profiles is instant and safe in
+both directions.** `browser_profile()` never stops the browser you're
+leaving — it only redirects where the *next* tool call points
+(`BROWSER_CDP_URL`). Both processes keep running, so switching back to one
+you already opened doesn't relaunch anything.
+
 ## Configuration
 
 Copy the example config and edit it:
