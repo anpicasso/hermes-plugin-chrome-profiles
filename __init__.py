@@ -3,8 +3,9 @@ Chrome Profiles Plugin
 ======================
 
 Registers a ``browser_profile`` tool that switches the agent's browser tools
-to a named Chrome instance via CDP.  Supports local (auto-launch) and remote
-(reachability-gated) profiles defined in ``config.yaml``.
+to a named Chrome, Brave, or Edge instance via CDP.  Supports local
+(auto-launch) and remote (reachability-gated) profiles defined in
+``config.yaml``.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -117,10 +119,18 @@ def _get_profile_lock(profile_name: str) -> threading.Lock:
         _profile_locks[profile_name] = threading.Lock()
     return _profile_locks[profile_name]
 
+# ---------------------------------------------------------------------------
+# Browser binary resolution
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Chrome binary resolution
-# ---------------------------------------------------------------------------
+# macOS ships Chrome/Brave/Edge as .app bundles with no CLI symlink on PATH,
+# so plain `shutil.which()` never finds them there. Fall back to each
+# browser's standard install path on that platform only.
+_MAC_APP_PATHS = {
+    "chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "brave": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "edge": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+}
 
 _CHROME_SEARCH_NAMES = [
     "google-chrome",
@@ -130,6 +140,12 @@ _CHROME_SEARCH_NAMES = [
     "chromium",
 ]
 
+_BRAVE_SEARCH_NAMES = [
+    "brave-browser",
+    "brave-browser-stable",
+    "brave",
+]
+
 _EDGE_SEARCH_NAMES = [
     "microsoft-edge",
     "microsoft-edge-stable",
@@ -137,100 +153,59 @@ _EDGE_SEARCH_NAMES = [
 ]
 
 
-def _find_chrome(profile_cfg: Dict[str, Any]) -> Optional[str]:
-    """Resolve Chrome binary path.
+def _resolve_binary(
+    profile_cfg: Dict[str, Any], binary_key: str, search_names: List[str], mac_key: str
+) -> Optional[str]:
+    """Resolve a browser binary path.
 
-    Priority: profile-level chrome_binary > top-level chrome_binary > PATH.
+    Priority: profile-level override > top-level override > PATH >
+    macOS app-bundle default.
     """
-    # Per-profile override
-    binary = profile_cfg.get("chrome_binary")
-    if binary:
-        expanded = os.path.expanduser(binary)
-        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
-            return expanded
-        logger.warning("Profile chrome_binary not found/executable: %s", expanded)
+    for source, label in ((profile_cfg, "Profile"), (_load_config(), "Top-level")):
+        binary = source.get(binary_key)
+        if binary:
+            expanded = os.path.expanduser(binary)
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
+            logger.warning("%s %s not found/executable: %s", label, binary_key, expanded)
 
-    # Top-level override
-    config = _load_config()
-    binary = config.get("chrome_binary")
-    if binary:
-        expanded = os.path.expanduser(binary)
-        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
-            return expanded
-        logger.warning("Top-level chrome_binary not found/executable: %s", expanded)
-
-    # Auto-detect from PATH
-    for name in _CHROME_SEARCH_NAMES:
+    for name in search_names:
         found = shutil.which(name)
         if found:
             return found
 
-    return None
-
-
-def _find_edge(profile_cfg: Dict[str, Any]) -> Optional[str]:
-    """Resolve Edge binary path.
-
-    Priority: profile-level edge_binary > top-level edge_binary > PATH.
-    """
-    # Per-profile override
-    binary = profile_cfg.get("edge_binary")
-    if binary:
-        expanded = os.path.expanduser(binary)
-        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
-            return expanded
-        logger.warning("Profile edge_binary not found/executable: %s", expanded)
-
-    # Top-level override
-    config = _load_config()
-    binary = config.get("edge_binary")
-    if binary:
-        expanded = os.path.expanduser(binary)
-        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
-            return expanded
-        logger.warning("Top-level edge_binary not found/executable: %s", expanded)
-
-    # Auto-detect from PATH
-    for name in _EDGE_SEARCH_NAMES:
-        found = shutil.which(name)
-        if found:
-            return found
+    if sys.platform == "darwin":
+        mac_path = _MAC_APP_PATHS.get(mac_key)
+        if mac_path and os.path.isfile(mac_path) and os.access(mac_path, os.X_OK):
+            return mac_path
 
     return None
+
+
+_RESOLVERS = {
+    "chrome": ("chrome_binary", _CHROME_SEARCH_NAMES, "chrome"),
+    "brave": ("brave_binary", _BRAVE_SEARCH_NAMES, "brave"),
+    "edge": ("edge_binary", _EDGE_SEARCH_NAMES, "edge"),
+}
 
 
 def _find_browser(profile_cfg: Dict[str, Any]) -> tuple[Optional[str], str]:
     """Resolve browser binary path and type.
-    
-    Returns: (binary_path, browser_type) where browser_type is 'chrome' or 'edge'
-    Priority: Check browser_type in config first, then try auto-detect.
+
+    Returns: (binary_path, browser_type) where browser_type is 'chrome',
+    'brave', or 'edge'. Priority: explicit browser_type in config, else
+    auto-detect (Chrome, then Brave, then Edge).
     """
     browser_type = profile_cfg.get("browser_type", "auto").lower()
-    
-    # If explicitly set to edge, only look for Edge
-    if browser_type == "edge":
-        edge_binary = _find_edge(profile_cfg)
-        if edge_binary:
-            return edge_binary, "edge"
-        return None, "edge"
-    
-    # If explicitly set to chrome, only look for Chrome
-    if browser_type == "chrome":
-        chrome_binary = _find_chrome(profile_cfg)
-        if chrome_binary:
-            return chrome_binary, "chrome"
-        return None, "chrome"
-    
-    # Auto-detect: Try Chrome first, then Edge
-    chrome_binary = _find_chrome(profile_cfg)
-    if chrome_binary:
-        return chrome_binary, "chrome"
-    
-    edge_binary = _find_edge(profile_cfg)
-    if edge_binary:
-        return edge_binary, "edge"
-    
-    return None, "unknown"
+    order = [browser_type] if browser_type in _RESOLVERS else list(_RESOLVERS)
+
+    for label in order:
+        binary_key, search_names, mac_key = _RESOLVERS[label]
+        binary = _resolve_binary(profile_cfg, binary_key, search_names, mac_key)
+        if binary:
+            return binary, label
+
+    return None, browser_type if browser_type in _RESOLVERS else "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +246,15 @@ def _is_cdp_ready(host: str, port: int, timeout: float = 2.0) -> bool:
 # Chrome launch (local only)
 # ---------------------------------------------------------------------------
 
-def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: str = "") -> bool:
+def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: str = "", profile_directory: Optional[str] = None) -> bool:
     """Launch Chrome with remote debugging.  Returns True if port comes up."""
     global _chrome_pids
 
     expanded_dir = os.path.expanduser(data_dir)
+
+    # First-run: --user-data-dir doesn't exist yet, but the log file below
+    # lives inside it, so create it before opening the log.
+    os.makedirs(expanded_dir, exist_ok=True)
 
     # BUG 6: Log stderr to file for debugging launch failures
     log_file_path = os.path.join(expanded_dir, "chrome-launch.log")
@@ -287,6 +266,8 @@ def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: s
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    if profile_directory:
+        cmd.append(f"--profile-directory={profile_directory}")
 
     logger.info("Launching Chrome: %s", " ".join(cmd))
 
@@ -558,8 +539,8 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({
                         "error": (
                             f"Profile '{name}' is not running on port {port} and no browser "
-                            "binary found. Set chrome_binary or edge_binary in config.yaml, "
-                            "or install Chrome/Edge."
+                            "binary found. Set chrome_binary, brave_binary, or edge_binary "
+                            "in config.yaml, or install Chrome/Brave/Edge."
                         ),
                         "profile": name,
                         "port": port,
@@ -579,22 +560,39 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
                             "browser": "edge",
                         })
                 else:
-                    # Chrome uses data_dir
+                    # Chrome and Brave both use --user-data-dir (Brave is
+                    # Chromium-based and accepts the same launch flags).
+                    # profile_directory (e.g. "Profile 3") optionally selects
+                    # a specific named sub-profile within data_dir. IMPORTANT:
+                    # this only works when no other browser process is
+                    # already running against that same data_dir — see the
+                    # "What this does NOT do" section in the README for the
+                    # single-instance-lock caveat.
                     data_dir = cfg.get("data_dir", "")
+                    profile_directory = cfg.get("profile_directory")
                     if not data_dir:
-                        return json.dumps({
-                            "error": f"Local profile '{name}' has no data_dir configured",
-                        })
+                        if profile_directory:
+                            # Default to the browser's standard user-data-dir
+                            # on macOS when only profile_directory is given.
+                            default_dirs = {
+                                "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
+                                "chrome": "~/Library/Application Support/Google/Chrome",
+                            }
+                            data_dir = default_dirs.get(browser_type, "")
+                        if not data_dir:
+                            return json.dumps({
+                                "error": f"Local profile '{name}' has no data_dir configured",
+                            })
 
-                    launched = _launch_chrome(browser_binary, data_dir, port, profile_name=name)
+                    launched = _launch_chrome(browser_binary, data_dir, port, profile_name=name, profile_directory=profile_directory)
                     if not launched:
                         config = _load_config()
                         timeout = config.get("launch_timeout", 10)
                         return json.dumps({
-                            "error": f"Launched Chrome for '{name}' but port {port} didn't come up within {timeout}s",
+                            "error": f"Launched {browser_type.capitalize()} for '{name}' but port {port} didn't come up within {timeout}s",
                             "profile": name,
                             "port": port,
-                            "browser": "chrome",
+                            "browser": browser_type,
                         })
 
     _flush_browser_sessions()

@@ -1,6 +1,6 @@
-# Chrome Profiles Plugin — Installed ✓
+# Chrome/Brave/Edge Profiles Plugin — Installed ✓
 
-Manage multiple Chrome browser profiles from your agent's browser tools.
+Manage multiple Chrome, Brave, or Edge browser profiles from your agent's browser tools.
 
 ## Configuration
 
@@ -40,5 +40,5 @@ After switching, all browser tools (`browser_navigate`, `browser_click`, etc.) o
 
 ## Profile types
 
-- **local** — Auto-launches Chrome if not running. Requires `port` + `data_dir`.
+- **local** — Auto-launches Chrome/Brave/Edge if not running. Requires `port` + `data_dir` (or `profile_directory` for Edge).
 - **remote** — Checks reachability only. Requires `port` + `host`. Fails if unreachable.

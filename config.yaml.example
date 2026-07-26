@@ -1,4 +1,4 @@
-# Chrome/Edge profile configuration for browser_profile tool
+# Chrome/Brave/Edge profile configuration for browser_profile tool
 #
 # Each profile defines a browser instance the agent can connect to via CDP.
 #
@@ -7,13 +7,15 @@
 #   remote — Browser runs elsewhere. Fails if host:port is unreachable.
 #
 # Browser selection (per-profile):
-#   browser_type: chrome | edge | auto (default: auto)
-#   For auto: tries Chrome first, then Edge
+#   browser_type: chrome | brave | edge | auto (default: auto)
+#   For auto: tries Chrome first, then Brave, then Edge
 #
 # Binary paths (optional): absolute path to browser executable.
-#   Per-profile overrides top-level. Top-level overrides PATH auto-detect.
+#   Per-profile overrides top-level. Top-level overrides PATH auto-detect,
+#   which is checked before falling back to the macOS default app path.
 #
 # chrome_binary: /opt/google/chrome/google-chrome
+# brave_binary: /usr/bin/brave-browser
 # edge_binary: /usr/bin/microsoft-edge
 
 profiles:
@@ -30,12 +32,31 @@ profiles:
     data_dir: ~/.config/chrome-personal
     # chrome_binary: /usr/bin/google-chrome-beta
 
+  # Example: Brave profile
+  brave:
+    type: local
+    browser_type: brave
+    port: 9252
+    data_dir: ~/.config/brave-profile
+
   # Example: Microsoft Edge profile (no data_dir, uses profile_directory)
   devsu:
     type: local
     browser_type: edge
     port: 9223
     profile_directory: "Default"
+
+  # Example: Chrome/Brave selecting a named sub-profile within an existing
+  # data_dir (e.g. a profile you already use day-to-day with saved logins).
+  # Requires quitting any browser already running against that data_dir
+  # first — see README "What this does NOT do" for the single-instance-lock
+  # caveat before relying on this.
+  research:
+    type: local
+    browser_type: brave
+    port: 9254
+    profile_directory: "Profile 3"
+    # data_dir omitted: defaults to the standard macOS Brave user-data-dir
 
   # remote-server:
   #   type: remote
