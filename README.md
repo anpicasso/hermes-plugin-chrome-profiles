@@ -1,8 +1,8 @@
-# Chrome/Edge Profiles Plugin
+# Chrome/Brave/Edge Profiles Plugin
 
-Switch the agent's browser tools between multiple Chrome **or Microsoft Edge** instances via CDP (Chrome DevTools Protocol). Each profile maps to a browser instance with its own user data directory, cookies, and authenticated sessions.
+Switch the agent's browser tools between multiple Chrome, Brave, **or Microsoft Edge** instances via CDP (Chrome DevTools Protocol). Each profile maps to a browser instance with its own user data directory, cookies, and authenticated sessions.
 
-Supports both **Google Chrome** (`--user-data-dir`) and **Microsoft Edge** (`--profile-directory`).
+Supports **Google Chrome** and **Brave** (`--user-data-dir`) and **Microsoft Edge** (`--profile-directory`). Brave is Chromium-based and accepts the same launch flags as Chrome.
 
 ## How it works
 
@@ -11,7 +11,7 @@ The plugin registers a single tool: `browser_profile(name)`.
 When called, it:
 
 1. Looks up the named profile in `config.yaml`
-2. **Local profiles** — checks if browser is running on the configured port. If not, launches it with the correct arguments (`--user-data-dir` for Chrome, `--profile-directory` for Edge) and `--remote-debugging-port`. Waits for the port to come up.
+2. **Local profiles** — checks if browser is running on the configured port. If not, launches it with the correct arguments (`--user-data-dir` for Chrome/Brave, `--profile-directory` for Edge) and `--remote-debugging-port`. Waits for the port to come up.
 3. **Remote profiles** — checks if `host:port` is reachable. Fails immediately if not (no launch attempt).
 4. Sets `BROWSER_CDP_URL` in the running process so all subsequent browser tool calls (`browser_navigate`, `browser_click`, `browser_snapshot`, `browser_vision`, etc.) go through that browser instance.
 5. Flushes any stale browser sessions from previous connections.
@@ -45,6 +45,13 @@ profiles:
     # Optional: per-profile Chrome binary override
     # chrome_binary: /usr/bin/google-chrome-beta
 
+  # Brave profile
+  brave:
+    type: local
+    browser_type: brave
+    port: 9252
+    data_dir: ~/.config/brave-profile
+
   # Microsoft Edge profile (no data_dir, uses profile_directory)
   devsu:
     type: local
@@ -64,28 +71,25 @@ profiles:
 |-------|------|----------|-------------|
 | `type` | `local` or `remote` | Yes | Local profiles can auto-launch browser. Remote profiles only check reachability. |
 | `port` | integer | Yes | Browser remote debugging port. |
-| `browser_type` | `chrome`, `edge`, or `auto` | No | Browser type. `auto` tries Chrome then Edge. Default: `auto`. |
-| `data_dir` | string | Chrome local | Path to Chrome user data directory. Supports `~` expansion. |
+| `browser_type` | `chrome`, `brave`, `edge`, or `auto` | No | Browser type. `auto` tries Chrome, then Brave, then Edge. Default: `auto`. |
+| `data_dir` | string | Chrome/Brave local | Path to the browser's user data directory. Supports `~` expansion. |
 | `profile_directory` | string | Edge local | Edge profile name (e.g., `Default`). Required for Edge profiles. |
 | `host` | string | Remote only | Hostname or IP of the remote browser instance. |
-| `chrome_binary` | string | No | Absolute path to Chrome executable. Overrides global and PATH detection. |
-| `edge_binary` | string | No | Absolute path to Edge executable. Overrides global and PATH detection. |
+| `chrome_binary` | string | No | Absolute path to the Chrome executable. Overrides global and PATH detection. |
+| `brave_binary` | string | No | Absolute path to the Brave executable. Overrides global and PATH detection. |
+| `edge_binary` | string | No | Absolute path to the Edge executable. Overrides global and PATH detection. |
 
 ### Browser binary resolution (local profiles)
 
-When a local profile needs to launch a browser, the binary is resolved based on `browser_type`:
+When a local profile needs to launch a browser, the binary is resolved based on `browser_type`. For each type, priority is: profile-level `*_binary` field, top-level `*_binary` field, PATH auto-detect, then (macOS only) the browser's default `/Applications/*.app` path — macOS ships Chrome/Brave/Edge as app bundles with no CLI symlink on PATH, so PATH auto-detect alone never finds them there.
 
-**For Chrome profiles:**
-1. Profile-level `chrome_binary` field
-2. Top-level `chrome_binary` field
-3. Auto-detect from PATH: `google-chrome`, `google-chrome-stable`, `google-chrome-beta`, `chromium-browser`, `chromium`
+**For Chrome profiles:** `chrome_binary` → PATH (`google-chrome`, `google-chrome-stable`, `google-chrome-beta`, `chromium-browser`, `chromium`) → macOS `Google Chrome.app`.
 
-**For Edge profiles:**
-1. Profile-level `edge_binary` field
-2. Top-level `edge_binary` field
-3. Auto-detect from PATH: `microsoft-edge`, `microsoft-edge-stable`, `edge`
+**For Brave profiles:** `brave_binary` → PATH (`brave-browser`, `brave-browser-stable`, `brave`) → macOS `Brave Browser.app`.
 
-**For `browser_type: auto`:** Tries Chrome first, then Edge.
+**For Edge profiles:** `edge_binary` → PATH (`microsoft-edge`, `microsoft-edge-stable`, `edge`) → macOS `Microsoft Edge.app`.
+
+**For `browser_type: auto`:** Tries Chrome, then Brave, then Edge.
 
 ### Config reloading
 
