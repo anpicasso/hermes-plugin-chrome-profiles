@@ -46,6 +46,18 @@ profiles:
     port: 9223
     profile_directory: "Default"
 
+  # Example: Chrome/Brave selecting a named sub-profile within an existing
+  # data_dir (e.g. a profile you already use day-to-day with saved logins).
+  # Requires quitting any browser already running against that data_dir
+  # first — see README "What this does NOT do" for the single-instance-lock
+  # caveat before relying on this.
+  research:
+    type: local
+    browser_type: brave
+    port: 9254
+    profile_directory: "Profile 3"
+    # data_dir omitted: defaults to the standard macOS Brave user-data-dir
+
   # remote-server:
   #   type: remote
   #   host: 192.168.1.100

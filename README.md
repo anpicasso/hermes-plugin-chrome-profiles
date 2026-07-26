@@ -2,7 +2,7 @@
 
 Switch the agent's browser tools between multiple Chrome, Brave, **or Microsoft Edge** instances via CDP (Chrome DevTools Protocol). Each profile maps to a browser instance with its own user data directory, cookies, and authenticated sessions.
 
-Supports **Google Chrome** and **Brave** (`--user-data-dir`) and **Microsoft Edge** (`--profile-directory`). Brave is Chromium-based and accepts the same launch flags as Chrome.
+Supports **Google Chrome** and **Brave** (`--user-data-dir`, optionally combined with `--profile-directory` to select a named sub-profile) and **Microsoft Edge** (`--profile-directory` only).
 
 ## How it works
 
@@ -20,32 +20,37 @@ Calling `browser_profile()` with no arguments lists all available profiles and w
 
 ## What this does NOT do
 
-**`data_dir` (or `profile_directory`) *is* the profile.** This tool does not
-reach into an existing browser and select one of its named profiles
-(e.g. Chrome/Brave's "Profile 2") — it launches a browser process pointed at
-whatever directory you give it. Point it at a directory that already has a
-profile, that's what opens.
+**A second launch against an *already-running* browser's `data_dir` gets
+silently absorbed.** If a Chrome/Brave process is already open using a
+given `--user-data-dir` (e.g. your everyday default browser), launching
+another instance pointed at that *same* directory — even with a different
+`--profile-directory` and a fresh `--remote-debugging-port` — gets
+silently absorbed by Chromium's single-instance lock. The new port never
+comes up (the tool call times out); the request just opens a window/tab
+in whatever process was already running, ignoring the new debugging port.
 
-**It cannot pick a profile out of an already-running shared browser.** If you
-normally run one Chrome/Brave with several named profiles (Default,
-"Work", "Personal", ...) sharing one `--user-data-dir`, and that browser is
-already open, a second launch against that *same* `--user-data-dir` —
-even with a different `--profile-directory` and a fresh
-`--remote-debugging-port` — gets silently absorbed by Chromium's
-single-instance lock. The new port never comes up (the tool call times out);
-the request just opens a window/tab in whatever process was already running,
-ignoring the new debugging port.
+**To manage a named profile (e.g. Chrome/Brave's "Profile 2") living
+inside a shared `data_dir`,** you have two options:
 
-**To manage one of those existing named profiles with this tool**, copy it
-out into its own directory first:
+1. **Quit the existing browser first**, then set `data_dir` to that
+   shared directory and add `profile_directory: "Profile 2"` (Chrome/Brave
+   now supports this field, same as Edge). The plugin launches
+   `--user-data-dir=<data_dir> --profile-directory=<profile_directory>`
+   against the now-idle directory, so the named profile — and its
+   existing cookies/logins — comes up directly. This is the fastest path
+   and requires no copying, but any other window using that `data_dir`
+   must be closed first (and stays closed until you relaunch it
+   separately).
+2. **Copy the profile out into its own directory** if you need it running
+   *alongside* the original browser instance:
 
-```
-cp -R "$HOME/Library/Application Support/Google/Chrome/Profile 2" ~/.config/chrome-work
-```
+   ```
+   cp -R "$HOME/Library/Application Support/Google/Chrome/Profile 2" ~/.config/chrome-work
+   ```
 
-Then point a `config.yaml` entry's `data_dir` at the copy. It's a snapshot,
-not a live link — logins made in the original profile afterward won't
-appear in the copy.
+   Then point a `config.yaml` entry's `data_dir` at the copy (omit
+   `profile_directory`). It's a snapshot, not a live link — logins made
+   in the original profile afterward won't appear in the copy.
 
 **Switching between two already-launched profiles is instant and safe in
 both directions.** `browser_profile()` never stops the browser you're
@@ -108,7 +113,7 @@ profiles:
 | `port` | integer | Yes | Browser remote debugging port. |
 | `browser_type` | `chrome`, `brave`, `edge`, or `auto` | No | Browser type. `auto` tries Chrome, then Brave, then Edge. Default: `auto`. |
 | `data_dir` | string | Chrome/Brave local | Path to the browser's user data directory. Supports `~` expansion. |
-| `profile_directory` | string | Edge local | Edge profile name (e.g., `Default`). Required for Edge profiles. |
+| `profile_directory` | string | No | Named sub-profile within `data_dir` (e.g., `Default`, `Profile 2`). **Required** for Edge local profiles. Optional for Chrome/Brave local profiles — when set without `data_dir`, defaults to the browser's standard macOS user-data-dir. See the single-instance-lock caveat above before relying on this for Chrome/Brave. |
 | `host` | string | Remote only | Hostname or IP of the remote browser instance. |
 | `chrome_binary` | string | No | Absolute path to the Chrome executable. Overrides global and PATH detection. |
 | `brave_binary` | string | No | Absolute path to the Brave executable. Overrides global and PATH detection. |

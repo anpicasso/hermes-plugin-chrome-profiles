@@ -246,7 +246,7 @@ def _is_cdp_ready(host: str, port: int, timeout: float = 2.0) -> bool:
 # Chrome launch (local only)
 # ---------------------------------------------------------------------------
 
-def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: str = "") -> bool:
+def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: str = "", profile_directory: Optional[str] = None) -> bool:
     """Launch Chrome with remote debugging.  Returns True if port comes up."""
     global _chrome_pids
 
@@ -266,6 +266,8 @@ def _launch_chrome(chrome_binary: str, data_dir: str, port: int, profile_name: s
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    if profile_directory:
+        cmd.append(f"--profile-directory={profile_directory}")
 
     logger.info("Launching Chrome: %s", " ".join(cmd))
 
@@ -560,13 +562,29 @@ def browser_profile(args: Dict[str, Any], **kwargs) -> str:
                 else:
                     # Chrome and Brave both use --user-data-dir (Brave is
                     # Chromium-based and accepts the same launch flags).
+                    # profile_directory (e.g. "Profile 3") optionally selects
+                    # a specific named sub-profile within data_dir. IMPORTANT:
+                    # this only works when no other browser process is
+                    # already running against that same data_dir — see the
+                    # "What this does NOT do" section in the README for the
+                    # single-instance-lock caveat.
                     data_dir = cfg.get("data_dir", "")
+                    profile_directory = cfg.get("profile_directory")
                     if not data_dir:
-                        return json.dumps({
-                            "error": f"Local profile '{name}' has no data_dir configured",
-                        })
+                        if profile_directory:
+                            # Default to the browser's standard user-data-dir
+                            # on macOS when only profile_directory is given.
+                            default_dirs = {
+                                "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
+                                "chrome": "~/Library/Application Support/Google/Chrome",
+                            }
+                            data_dir = default_dirs.get(browser_type, "")
+                        if not data_dir:
+                            return json.dumps({
+                                "error": f"Local profile '{name}' has no data_dir configured",
+                            })
 
-                    launched = _launch_chrome(browser_binary, data_dir, port, profile_name=name)
+                    launched = _launch_chrome(browser_binary, data_dir, port, profile_name=name, profile_directory=profile_directory)
                     if not launched:
                         config = _load_config()
                         timeout = config.get("launch_timeout", 10)
