@@ -1,3 +1,5 @@
+
+
 # Chrome/Edge Profiles Plugin
 
 Switch the agent's browser tools between multiple Chrome **or Microsoft Edge** instances via CDP (Chrome DevTools Protocol). Each profile maps to a browser instance with its own user data directory, cookies, and authenticated sessions.
@@ -32,6 +34,9 @@ Then edit `config.yaml` to match your setup:
 # Optional: global Chrome binary path (overrides PATH auto-detection)
 # chrome_binary: /opt/google/chrome/google-chrome
 
+# Optional: max seconds to wait for browser to start (default: 10)
+# launch_timeout: 15
+
 profiles:
   work:
     type: local
@@ -57,6 +62,8 @@ profiles:
     host: 192.168.1.100
     port: 9250
 ```
+
+Top-level `launch_timeout` controls how long the plugin waits for the browser to become ready after launching.
 
 ### Profile fields
 
