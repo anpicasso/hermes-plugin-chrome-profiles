@@ -404,7 +404,7 @@ def _launch_edge(edge_binary: str, profile_directory: str, port: int, profile_na
 def _flush_browser_sessions():
     """Clear active browser sessions so the next tool call uses the new CDP URL."""
     try:
-        from tools.browser_tool import cleanup_all_browsers
+        from tools.browser_tool_lifecycle import cleanup_all_browsers
         cleanup_all_browsers()
     except ImportError:
         pass  # Expected when browser_tool not available
