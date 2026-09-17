@@ -1,136 +1,145 @@
-# Chrome/Edge Profiles Plugin
+# hermes-plugin-chrome-profiles
 
-Switch the agent's browser tools between multiple Chrome **or Microsoft Edge** instances via CDP (Chrome DevTools Protocol). Each profile maps to a browser instance with its own user data directory, cookies, and authenticated sessions.
+Switch Hermes' browser tools to a named Chromium-family browser over CDP, so the agent
+inherits that browser's cookies and logged-in sessions.
 
-Supports both **Google Chrome** (`--user-data-dir`) and **Microsoft Edge** (`--profile-directory`).
+Adds one tool, `browser_profile`, and one slash command, `/browser-profile`.
 
-## How it works
+## What it affects
 
-The plugin registers a single tool: `browser_profile(name)`.
+Setting a profile sets `BROWSER_CDP_URL` — the same public override `/browser connect`
+uses — which sits at the top of Hermes' backend precedence. So a switch redirects
+**every** browser surface at once:
 
-When called, it:
+- `browser_exec` (Browser Use CLI backend)
+- the built-in `browser_navigate` / `browser_click` / `browser_snapshot` / `browser_vision` tools
+- `browser_vault_fill` and friends (the CDP supervisor is attached for you)
 
-1. Looks up the named profile in `config.yaml`
-2. **Local profiles** — checks if browser is running on the configured port. If not, launches it with the correct arguments (`--user-data-dir` for Chrome, `--profile-directory` for Edge) and `--remote-debugging-port`. Waits for the port to come up.
-3. **Remote profiles** — checks if `host:port` is reachable. Fails immediately if not (no launch attempt).
-4. Sets `BROWSER_CDP_URL` in the running process so all subsequent browser tool calls (`browser_navigate`, `browser_click`, `browser_snapshot`, `browser_vision`, etc.) go through that browser instance.
-5. Flushes any stale browser sessions from previous connections.
+It also flushes live browser sessions, so the next tool call dials the new endpoint
+instead of a stale one.
 
-Calling `browser_profile()` with no arguments lists all available profiles and which one is currently active.
+## Requirements
+
+- A Chromium-family browser: Chrome, Chromium, Brave, Brave Origin, or Edge.
+  Firefox and Camofox have no CDP surface and are not supported.
+- `browser.backend: off` is fine, `browser-use` is fine, a cloud provider is fine — the
+  override wins over all of them. `browser.cdp_url` in config.yaml is the one thing that
+  outranks the plugin for tools that read config directly, so leave it unset.
 
 ## Configuration
 
-Copy the example config and edit it:
-
-```
-cp config.yaml.example config.yaml
-```
-
-Then edit `config.yaml` to match your setup:
+Profiles live in your Hermes profile's `config.yaml`, not in the plugin directory
+(a reinstall replaces the plugin snapshot):
 
 ```yaml
-# Optional: global Chrome binary path (overrides PATH auto-detection)
-# chrome_binary: /opt/google/chrome/google-chrome
+plugins:
+  entries:
+    chrome-profiles:
+      settings:
+        launch_timeout: 20        # optional, seconds
+        profiles:
+          work:
+            port: 9250           # required
 
-profiles:
-  work:
-    type: local
-    port: 9250
-    data_dir: ~/.config/chrome-work
+          uni:
+            port: 9251
+            browser: edge        # chrome | chromium | brave | brave-origin | edge
+            headless: false
 
-  personal:
-    type: local
-    port: 9251
-    data_dir: ~/.config/chrome-personal
-    # Optional: per-profile Chrome binary override
-    # chrome_binary: /usr/bin/google-chrome-beta
+          scraper:
+            port: 9252
+            headless: true
 
-  # Microsoft Edge profile (no data_dir, uses profile_directory)
-  devsu:
-    type: local
-    browser_type: edge
-    port: 9223
-    profile_directory: "Default"
-
-  remote-server:
-    type: remote
-    host: 192.168.1.100
-    port: 9250
+          box:
+            host: 192.168.1.100  # any 'host' => remote, never launched
+            port: 9222
 ```
+
+Edits are picked up on the next call — no restart.
 
 ### Profile fields
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | `local` or `remote` | Yes | Local profiles can auto-launch browser. Remote profiles only check reachability. |
-| `port` | integer | Yes | Browser remote debugging port. |
-| `browser_type` | `chrome`, `edge`, or `auto` | No | Browser type. `auto` tries Chrome then Edge. Default: `auto`. |
-| `data_dir` | string | Chrome local | Path to Chrome user data directory. Supports `~` expansion. |
-| `profile_directory` | string | Edge local | Edge profile name (e.g., `Default`). Required for Edge profiles. |
-| `host` | string | Remote only | Hostname or IP of the remote browser instance. |
-| `chrome_binary` | string | No | Absolute path to Chrome executable. Overrides global and PATH detection. |
-| `edge_binary` | string | No | Absolute path to Edge executable. Overrides global and PATH detection. |
+| Field | Required | Meaning |
+|---|---|---|
+| `port` | yes | Remote-debugging port. |
+| `host` | — | Set it to make the profile **remote**: reachability is checked, nothing is launched. |
+| `browser` | — | Which Chromium family binary. Default: your system default Chromium. |
+| `binary` | — | Absolute path, overriding `browser` detection. |
+| `data_dir` | — | User-data-dir. Default: `~/.hermes/browser-profiles/<name>`. |
+| `profile_directory` | — | Profile *inside* the data dir (`Default`, `Profile 2`). |
+| `headless` | — | Default: headed, except on a display-less Linux host where a headed launch would die. |
 
-### Browser binary resolution (local profiles)
+### `data_dir` and your everyday browser
 
-When a local profile needs to launch a browser, the binary is resolved based on `browser_type`:
+Pointing `data_dir` at a browser's own default profile is **refused**. Chromium ≥136
+rejects remote debugging on the default user-data-dir, and your running browser holds it
+via `SingletonLock` — the launch fails or attaches to nothing.
 
-**For Chrome profiles:**
-1. Profile-level `chrome_binary` field
-2. Top-level `chrome_binary` field
-3. Auto-detect from PATH: `google-chrome`, `google-chrome-stable`, `google-chrome-beta`, `chromium-browser`, `chromium`
+To browse as your real logged-in self, use Hermes' built-in support instead, which
+snapshots the profile and launches on the copy:
 
-**For Edge profiles:**
-1. Profile-level `edge_binary` field
-2. Top-level `edge_binary` field
-3. Auto-detect from PATH: `microsoft-edge`, `microsoft-edge-stable`, `edge`
+```yaml
+browser:
+  use_real_profile: true
+```
 
-**For `browser_type: auto`:** Tries Chrome first, then Edge.
+This plugin is for *dedicated* profiles: separate work/personal/scraper identities you
+log into once, plus remote browsers on other machines.
 
-### Config reloading
+### One browser per `data_dir`
 
-`config.yaml` is re-read on every `browser_profile()` call. Edit the file and the next call picks up changes — no restart needed.
+Chromium's single-instance lock is per user-data-dir. Launching a second browser against
+a directory another process already holds is **silently absorbed** — the new
+`--remote-debugging-port` is ignored, a tab just opens in the existing process, and the
+port never binds. `--profile-directory` does not escape this; the lock covers the whole
+user-data-dir, not one profile inside it.
 
-## Usage examples
+The plugin detects the holder before launching and fails immediately, naming the PID,
+instead of burning `launch_timeout` on a browser that will never appear. Give each
+profile its own `data_dir` (the default already does), or quit the holder first.
 
-From the agent's perspective (these are tool calls the LLM makes):
+*This failure mode was diagnosed by [LaansDole](https://github.com/LaansDole).*
+
+## Usage
 
 ```
-# List all profiles
-browser_profile()
+browser_profile()                        # list profiles, show which is active
+browser_profile(name="work")             # switch (launches on demand)
+browser_profile(disconnect=True)         # release the override
+```
 
-# Switch to work profile (auto-launches Chrome if needed)
-browser_profile(name="work")
-
-# Now all browser tools use that Chrome instance:
-browser_navigate(url="https://mail.google.com")
-browser_snapshot()
-
-# Switch to a different profile
-browser_profile(name="personal")
-browser_navigate(url="https://github.com")
-
-# Connect to Chrome on another machine
-browser_profile(name="remote-server")
+```
+/browser-profile          # list
+/browser-profile work     # switch
+/browser-profile off      # release
 ```
 
 ## Installation
-
-Drop this directory into `~/.hermes/plugins/` or install with:
 
 ```
 hermes plugins install anpicasso/hermes-plugin-chrome-profiles
 ```
 
-The installer will automatically copy `config.yaml.example` to `config.yaml` for you.
+Then add a `profiles` block to `config.yaml` (see above) and restart the gateway —
+Python plugins have no hot reload.
 
-## Files
+## Notes
+
+- Browsers this plugin launched are terminated on plugin unload / reload. A browser that
+  was already listening on the port is left alone.
+- A port held by a non-CDP process is reported as an error rather than fought over.
+- The launched browser is user-visible and may hold live logins; the tool result says so,
+  so the agent avoids closing tabs or navigating away from the user's work.
+
+## Credits
+
+The single-instance-lock failure mode (a second launch against a held `data_dir` being
+silently absorbed) was diagnosed by [LaansDole](https://github.com/LaansDole/hermes-plugin-chrome-profiles).
+
+## Self-check
 
 ```
-~/.hermes/plugins/chrome-profiles/
-├── plugin.yaml          # Plugin manifest
-├── config.yaml.example  # Configuration template
-├── config.yaml          # Your configuration (created on install, gitignored)
-├── __init__.py          # Tool registration and logic
-└── README.md            # This file
+PYTHONPATH=~/.hermes/hermes-agent python3 ~/.hermes/plugins/chrome-profiles/__init__.py
 ```
+
+Exercises config resolution against the real host helpers. Launches nothing.

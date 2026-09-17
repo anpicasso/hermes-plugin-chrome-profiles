@@ -1,44 +1,54 @@
-# Chrome Profiles Plugin — Installed ✓
+# chrome-profiles — installed ✓
 
-Manage multiple Chrome browser profiles from your agent's browser tools.
+Adds `browser_profile` (tool) and `/browser-profile` (slash command).
 
-## Configuration
+## 1. Configure profiles in config.yaml
 
-Edit the profiles config at:
-
-```
-~/.hermes/plugins/chrome-profiles/config.yaml
-```
-
-### Example
+Not in the plugin directory — a reinstall would wipe it.
 
 ```yaml
-chrome_binary: /opt/google/chrome/google-chrome   # optional global override
-
-profiles:
-  work:
-    type: local
-    port: 9250
-    data_dir: ~/.config/chrome-work
-
-  remote-server:
-    type: remote
-    host: 192.168.1.100
-    port: 9250
+plugins:
+  entries:
+    chrome-profiles:
+      settings:
+        profiles:
+          work:
+            port: 9250
+          uni:
+            port: 9251
+            browser: edge
+          box:
+            host: 192.168.1.100   # remote: connect only, never launched
+            port: 9222
 ```
 
-## Usage
+Optional per profile: `browser`, `binary`, `data_dir`, `profile_directory`, `headless`.
+Defaults: your system default Chromium, headed, `~/.hermes/browser-profiles/<name>`.
 
-The plugin adds `browser_profile` to the agent's tool list.
+## 2. Restart the gateway
 
-| Call | Effect |
-|------|--------|
-| `browser_profile()` | List profiles + active one |
-| `browser_profile(name="work")` | Switch to work (launches Chrome if needed) |
+Python plugins have no hot reload:
 
-After switching, all browser tools (`browser_navigate`, `browser_click`, etc.) operate on that Chrome instance with full cookie/session access.
+```
+hermes gateway restart
+```
 
-## Profile types
+Profile edits after that are picked up live.
 
-- **local** — Auto-launches Chrome if not running. Requires `port` + `data_dir`.
-- **remote** — Checks reachability only. Requires `port` + `host`. Fails if unreachable.
+## 3. Use it
+
+```
+/browser-profile          list profiles + active one
+/browser-profile work     switch (launches the browser if needed)
+/browser-profile off      release the override
+```
+
+Switching redirects every browser surface — `browser_exec`, the built-in `browser_*`
+tools, and `browser_vault_*`.
+
+## Heads up
+
+`data_dir` pointing at a browser's own default profile is refused: Chromium ≥136 blocks
+remote debugging there. For "browse as my real logged-in self", set
+`browser.use_real_profile: true` in config.yaml instead — Hermes snapshots the profile
+and launches on the copy.

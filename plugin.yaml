@@ -1,8 +1,24 @@
 manifest_version: 1
 name: chrome-profiles
-version: 1.1.0
-description: Browser profile rotation — switch between local and remote Chrome/Edge instances via CDP
+version: 2.0.0
+description: >-
+  Switch Hermes' browser tools to a named Chromium-family browser over CDP, so they
+  inherit that browser's cookies and logged-in sessions. Local profiles launch on
+  demand; remote profiles connect to an already-listening endpoint.
 author: yuqi
+homepage: https://github.com/anpicasso/hermes-plugin-chrome-profiles
+license: MIT
+tags: [browser, cdp, chrome, edge, brave, profiles]
 provides_tools:
   - browser_profile
 provides_hooks: []
+config_schema:
+  profiles:
+    type: dict
+    description: >-
+      Map of profile name -> {port, [host], [browser], [binary], [data_dir],
+      [profile_directory], [headless]}. A 'host' key makes the profile remote.
+  launch_timeout:
+    type: int
+    default: 20
+    description: Seconds to wait for a launched browser to expose its CDP endpoint.
