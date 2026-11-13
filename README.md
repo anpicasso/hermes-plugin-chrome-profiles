@@ -7,24 +7,26 @@ Adds one tool, `browser_profile`, and one slash command, `/browser-profile`.
 
 ## What it affects
 
-Setting a profile sets `BROWSER_CDP_URL` — the same public override `/browser connect`
-uses — which sits at the top of Hermes' backend precedence. So a switch redirects
-**every** browser surface at once:
+Setting a profile publishes the endpoint as this profile's live CDP override — the same
+registry `/browser connect` writes — and mirrors it to `BROWSER_CDP_URL` for the CLI's
+status display. That override sits at the top of Hermes' backend precedence, so a switch
+redirects **every** browser surface at once:
 
 - `browser_exec` (Browser Use CLI backend)
 - the built-in `browser_navigate` / `browser_click` / `browser_snapshot` / `browser_vision` tools
 - `browser_vault_fill` and friends (the CDP supervisor is attached for you)
 
-It also flushes live browser sessions, so the next tool call dials the new endpoint
-instead of a stale one.
+It also flushes this profile's live browser sessions, so the next tool call dials the new
+endpoint instead of a stale one.
 
 ## Requirements
 
 - A Chromium-family browser: Chrome, Chromium, Brave, Brave Origin, or Edge.
   Firefox and Camofox have no CDP surface and are not supported.
 - `browser.backend: off` is fine, `browser-use` is fine, a cloud provider is fine — the
-  override wins over all of them. `browser.cdp_url` in config.yaml is the one thing that
-  outranks the plugin for tools that read config directly, so leave it unset.
+  override wins over all of them. Leaving `browser.cdp_url` unset is still recommended: it
+  applies whenever no profile is active, and a stale value there looks like a connected
+  browser to anything that reads config directly.
 
 ## Configuration
 
@@ -120,8 +122,9 @@ browser_profile(disconnect=True)         # release the override
 hermes plugins install anpicasso/hermes-plugin-chrome-profiles
 ```
 
-Then add a `profiles` block to `config.yaml` (see above) and restart the gateway —
-Python plugins have no hot reload.
+Then add a `profiles` block to `config.yaml` (see above). Current Hermes loads the plugin
+during `install`/`enable` and reloads the running gateway; if the installer reports
+`restart_required`, restart it (`hermes gateway restart`).
 
 ## Notes
 
@@ -140,6 +143,10 @@ silently absorbed) was diagnosed by [LaansDole](https://github.com/LaansDole/her
 
 ```
 PYTHONPATH=~/.hermes/hermes-agent python3 ~/.hermes/plugins/chrome-profiles/__init__.py
+PYTHONPATH=~/.hermes/hermes-agent python3 -m unittest discover -s tests -v
 ```
 
-Exercises config resolution against the real host helpers. Launches nothing.
+The first exercises config resolution against the real host helpers and launches
+nothing. The second pins the host seams the switch relies on (session flush, CDP
+supervisor, live override) so a renamed helper fails a test instead of leaving a
+silent no-op behind.

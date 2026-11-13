@@ -25,9 +25,11 @@ plugins:
 Optional per profile: `browser`, `binary`, `data_dir`, `profile_directory`, `headless`.
 Defaults: your system default Chromium, headed, `~/.hermes/browser-profiles/<name>`.
 
-## 2. Restart the gateway
+## 2. Load it
 
-Python plugins have no hot reload:
+Current Hermes activates the plugin during `install`/`enable` and asks the running
+gateway to reload it. If the install output reports `restart_required`, restart the
+gateway:
 
 ```
 hermes gateway restart

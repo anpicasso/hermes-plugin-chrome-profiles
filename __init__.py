@@ -5,8 +5,9 @@ Browser Use CLI, the built-in ``browser_*`` tools, and ``browser_vault_*``) to a
 named local or remote Chromium-family browser, so the agent inherits that
 browser's cookies and logged-in sessions.
 
-Mechanism is the same public contract ``/browser connect`` uses: set
-``BROWSER_CDP_URL``, flush live sessions, attach the CDP supervisor. Everything
+Mechanism is the same public contract ``/browser connect`` uses: publish the
+endpoint as this profile's live CDP override (and ``BROWSER_CDP_URL`` for the
+CLI status display), flush live sessions, attach the CDP supervisor. Everything
 Hermes already knows how to do (find a browser binary, probe a CDP endpoint on
 both loopbacks, pick a free port) is delegated to ``hermes_cli.browser_connect``.
 
@@ -38,8 +39,6 @@ _launched: Dict[str, subprocess.Popen] = {}
 # profile name -> launch lock. Two concurrent switches must not both launch.
 _locks: Dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
-
-_active: Optional[str] = None
 
 # Chromium flags for a Hermes-launched profile browser. Mirrors
 # hermes_cli.browser_connect._chrome_debug_args plus the noise suppression
@@ -73,14 +72,16 @@ def _hermes_home() -> Path:
 
 
 def _flush_sessions() -> None:
-    """Drop live browser sessions so the next tool call dials the new endpoint.
+    """Drop this profile's live browser sessions so the next tool call dials the new endpoint.
 
-    ``cleanup_all_browsers`` moved to ``tools.browser_tool_lifecycle``; importing it
-    from ``tools.browser_tool`` still resolves through a deprecated compat shim.
+    ``cleanup_all_browsers`` moved to ``tools.browser_session_lifecycle``; the
+    per-profile variant is what a multiplexed gateway's ``/browser connect`` uses,
+    so switching here never tears down another profile's browser.
     """
     try:
-        from tools.browser_tool_lifecycle import cleanup_all_browsers
-        cleanup_all_browsers()
+        from hermes_constants import hermes_home_key
+        from tools.browser_session_lifecycle import cleanup_profile_browsers
+        cleanup_profile_browsers(hermes_home_key())
     except Exception as e:  # a stale session is not worth failing the switch over
         logger.debug("browser session flush failed: %s", e)
 
@@ -89,11 +90,25 @@ def _supervisor(start: bool) -> None:
     """Attach/detach the per-task CDP supervisor so snapshots carry ``pending_dialogs``
     and ``frame_tree``, and ``browser_vault_fill`` has a secret-capable channel."""
     try:
-        from tools import browser_tool_cdp
-        (browser_tool_cdp._ensure_cdp_supervisor if start
-         else browser_tool_cdp._stop_cdp_supervisor)("default")
+        from tools import browser_session_cdp
+        (browser_session_cdp.ensure_cdp_supervisor if start
+         else browser_session_cdp.stop_cdp_supervisor)("default")
     except Exception as e:
         logger.debug("CDP supervisor %s failed (non-fatal): %s", "start" if start else "stop", e)
+
+
+def _current_override() -> str:
+    """The CDP override currently published for this profile, or "".
+
+    Reads the host's per-profile live registry first (what ``/browser connect`` in
+    the TUI/desktop publishes), then the process env used by the CLI.
+    """
+    try:
+        from tools.browser_session_cdp import live_cdp_override
+        live = live_cdp_override()
+    except Exception:
+        live = ""
+    return (live or os.environ.get("BROWSER_CDP_URL", "")).strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -333,41 +348,62 @@ def _reachable(spec: Dict[str, Any]) -> Optional[str]:
 
 
 def _listing() -> Dict[str, Any]:
-    global _active
+    live = _current_override().rstrip("/")
     entries = []
     for name, cfg in _profiles().items():
         spec, err = _resolve(name, cfg)
         if spec is None:
             entries.append({"name": name, "error": err})
             continue
+        reachable = _reachable(spec)
         entries.append({
             "name": name,
             "kind": "remote" if spec["remote"] else "local",
             "port": spec["port"],
-            "reachable": _reachable(spec) is not None,
-            "active": name == _active,
+            "reachable": reachable is not None,
+            "active": bool(live) and reachable is not None and reachable.rstrip("/") == live,
             **({"host": spec["host"]} if spec["remote"]
                else {"browser": spec["browser"], "data_dir": spec["data_dir"]}),
         })
-    if _active and not any(e.get("active") and e.get("reachable") for e in entries):
-        _active = None
-    return {"profiles": entries, "active": _active,
-            "cdp_url": os.environ.get("BROWSER_CDP_URL", ""),
+    return {"profiles": entries, "active": next((e["name"] for e in entries if e.get("active")), None),
+            "cdp_url": _current_override(),
             "hint": ("No profiles configured. Add them under plugins.entries.chrome-profiles."
                      "settings.profiles in config.yaml — see the plugin README.")
             if not entries else None}
 
 
-def _connect(url: str, name: Optional[str]) -> None:
+def _cli_ref():
+    """The interactive CLI object when this process is one, else None."""
+    ref = getattr(_ctx, "_cli_ref", None)
+    return ref if ref is not None else getattr(getattr(_ctx, "_manager", None), "_cli_ref", None)
+
+
+def _use_live_override() -> bool:
+    """Whether to publish the host's per-profile live override instead of env alone.
+
+    The interactive CLI's built-in ``/browser disconnect`` clears only
+    ``BROWSER_CDP_URL``, so a live override published there would survive it. Gateways
+    and desktop backends have no CLI ref and read the live registry (what
+    ``/browser connect`` publishes), because a served profile's secret scope hides the
+    process env.
+    """
+    return _cli_ref() is None
+
+
+def _connect(url: str) -> None:
     """Point every browser surface at ``url`` (or release it when ``url`` is empty)."""
-    global _active
+    if _use_live_override():
+        try:
+            from tools.browser_session_cdp import set_live_cdp_override
+            set_live_cdp_override(url or None)
+        except Exception as e:  # older host: the BROWSER_CDP_URL env below is its only seam
+            logger.debug("could not publish live CDP override: %s", e)
     if url:
         os.environ["BROWSER_CDP_URL"] = url
     else:
         os.environ.pop("BROWSER_CDP_URL", None)
     _flush_sessions()
     _supervisor(start=bool(url))
-    _active = name
 
 
 def browser_profile(args: Dict[str, Any], **kwargs) -> str:
@@ -383,9 +419,9 @@ def _browser_profile(args: Dict[str, Any]) -> str:
     name = str(args.get("name") or "").strip()
 
     if args.get("disconnect"):
-        if not os.environ.get("BROWSER_CDP_URL", "").strip():
+        if not _current_override():
             return json.dumps({"success": True, "message": "No profile was active."})
-        _connect("", None)
+        _connect("")
         return json.dumps({"success": True, "message": (
             "Released the CDP override. Browser tools reverted to the configured backend "
             "(browser.backend / cloud provider / local Chromium).")})
@@ -418,7 +454,7 @@ def _browser_profile(args: Dict[str, Any]) -> str:
             url, err = _launch(spec)
             if url is None:
                 return json.dumps({"error": err, "profile": name, "port": spec["port"]})
-        _connect(url, name)
+        _connect(url)
 
     return json.dumps({
         "success": True, "profile": name, "cdp_url": url,

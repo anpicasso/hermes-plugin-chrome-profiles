@@ -1,6 +1,6 @@
 manifest_version: 1
 name: chrome-profiles
-version: 2.0.0
+version: 2.0.1
 description: >-
   Switch Hermes' browser tools to a named Chromium-family browser over CDP, so they
   inherit that browser's cookies and logged-in sessions. Local profiles launch on
