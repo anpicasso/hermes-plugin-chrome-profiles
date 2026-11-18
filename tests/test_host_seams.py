@@ -14,6 +14,7 @@ supervisor never attaches.
 import importlib.util
 import json
 import os
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -93,6 +94,84 @@ class HostSeams(unittest.TestCase):
         self.assertEqual(listing["active"], "probe")
         self.assertTrue(listing["profiles"][0]["active"])
         self.assertEqual(listing["cdp_url"], url)
+
+
+class ContributionRegressions(unittest.TestCase):
+    """Pin the v2 equivalents of the closed v1 fork PRs (#2, #3, #4).
+
+    These are regressions, not new behavior: each assertion describes a seam that
+    already exists in v2.0.1. They exist so a future rewrite cannot silently drop
+    the capability a fork asked for while the original patch stays unmerged.
+    """
+
+    def test_host_browser_registry_keys_resolve(self):
+        """PR #2: Brave/Brave Origin resolve through the host registry, not a v1 table."""
+        bc = plugin._host()
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "browser")
+            Path(binary).write_text("", encoding="utf-8")
+            with mock.patch.object(bc, "chromium_executable", return_value=binary):
+                for key in bc._BROWSER_BY_KEY:
+                    spec, err = plugin._resolve(
+                        key, {"port": 9250, "browser": key,
+                              "data_dir": os.path.join(tmp, key)})
+                    self.assertIsNone(err, (key, err))
+                    self.assertEqual(spec["browser"], key)
+                    self.assertEqual(spec["binary"], binary)
+
+    def test_browser_default_data_dir_is_refused(self):
+        """PR #2 follow-up: the unsafe default-dir fallback stays rejected."""
+        bc = plugin._host()
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "browser")
+            Path(binary).write_text("", encoding="utf-8")
+            default_dir = bc.real_profile_data_dir("brave")
+            self.assertIsNotNone(default_dir)
+            with mock.patch.object(bc, "chromium_executable", return_value=binary):
+                spec, err = plugin._resolve(
+                    "brave", {"port": 9250, "browser": "brave", "data_dir": default_dir})
+        self.assertIsNone(spec)
+        self.assertIn("use_real_profile", err)
+
+    def test_launch_creates_data_dir_and_passes_profile_directory(self):
+        """PR #2: first launch can open its log; --profile-directory is appended."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "profile")
+            spec = {"name": "work", "browser": "brave", "binary": "/fake/brave",
+                    "port": 9250, "data_dir": data_dir,
+                    "profile_directory": "Profile 2", "headless": False}
+            proc = mock.Mock()
+            proc.poll.return_value = 0
+            try:
+                with mock.patch.object(plugin, "_holder_of", return_value=None), \
+                        mock.patch.object(plugin, "_launch_timeout", return_value=0.0), \
+                        mock.patch("subprocess.Popen", return_value=proc) as popen:
+                    url, err = plugin._launch(spec)
+            finally:
+                plugin._launched.pop("work", None)
+            argv = popen.call_args.args[0]
+            self.assertTrue(os.path.isdir(data_dir))
+            self.assertTrue(os.path.isfile(os.path.join(data_dir, "hermes-launch.log")))
+            self.assertIn(f"--user-data-dir={data_dir}", argv)
+            self.assertIn(f"--remote-debugging-port={spec['port']}", argv)
+            self.assertIn("--profile-directory=Profile 2", argv)
+            self.assertIsNone(url)
+            self.assertIn("did not expose CDP", err)
+
+    def test_launch_timeout_defaults_to_documented_20_seconds(self):
+        """PR #3: the README documents 20; keep the code and bad-config fallback at 20."""
+        saved = plugin._ctx
+        try:
+            setattr(plugin, "_ctx", None)
+            self.assertEqual(plugin._launch_timeout(), 20.0)
+            setattr(plugin, "_ctx",
+                    types.SimpleNamespace(get_config=lambda key, default=None: "bad"))
+            self.assertEqual(plugin._launch_timeout(), 20.0)
+            setattr(plugin, "_ctx",
+                    types.SimpleNamespace(get_config=lambda key, default=None: 5))
+            self.assertEqual(plugin._launch_timeout(), 5.0)
+        finally:
+            setattr(plugin, "_ctx", saved)
 
 
 if __name__ == "__main__":

@@ -134,10 +134,27 @@ during `install`/`enable` and reloads the running gateway; if the installer repo
 - The launched browser is user-visible and may hold live logins; the tool result says so,
   so the agent avoids closing tabs or navigating away from the user's work.
 
-## Credits
+## Credits and fork history
 
-The single-instance-lock failure mode (a second launch against a held `data_dir` being
-silently absorbed) was diagnosed by [LaansDole](https://github.com/LaansDole/hermes-plugin-chrome-profiles).
+This plugin was rebuilt on Hermes 0.23.1's public browser seams. No code from the
+v1-era forks below was merged as-is; each capability they proposed exists in the
+current implementation through a different seam. The PRs are kept here for the
+record, with the exact fork commits.
+
+| PR | Fork | Outcome | Equivalent in v2.0.1 |
+|---|---|---|---|
+| [#2](https://github.com/anpicasso/hermes-plugin-chrome-profiles/pull/2) | [LaansDole @ `07427b6`](https://github.com/LaansDole/hermes-plugin-chrome-profiles/commit/07427b6e2fd2063553b4d03046dee73b2ddc747e) | Closed unmerged; v1-only patch | Brave/Brave Origin and macOS `.app` discovery come from the host's `hermes_cli.browser_connect.chromium_executable()`; `_launch()` creates `data_dir` before opening its log and appends `--profile-directory`. |
+| [#3](https://github.com/anpicasso/hermes-plugin-chrome-profiles/pull/3) | [webbrain-one @ `c4ceb5e`](https://github.com/webbrain-one/hermes-plugin-chrome-profiles/commit/c4ceb5efe16900b5a76996bb40d8e81ef8a7ca16) | Closed unmerged; docs only | `launch_timeout` is documented above with the current default of 20 seconds. |
+| [#4](https://github.com/anpicasso/hermes-plugin-chrome-profiles/pull/4) | [aindaco1 @ `fe731e7`](https://github.com/aindaco1/hermes-plugin-chrome-profiles/commit/fe731e719360d72e0284ca3f193bf34063e73f17) | Closed unmerged; stale import target | `_flush_sessions()` uses `tools.browser_session_lifecycle.cleanup_profile_browsers(hermes_home_key())`, the profile-scoped API that replaced `cleanup_all_browsers`. |
+
+The single-instance-lock failure mode (a second launch against a held `data_dir`
+being silently absorbed) was diagnosed by
+[LaansDole](https://github.com/LaansDole/hermes-plugin-chrome-profiles). The fork
+also proposed falling back to the browser's real default user-data-dir when only
+`profile_directory` is set; that is deliberately **not** restored: Chromium ≥136
+refuses remote debugging on the default directory and the running browser holds
+`SingletonLock`, so `_default_dir_clash()` rejects it and points at
+`browser.use_real_profile: true` instead.
 
 ## Self-check
 
